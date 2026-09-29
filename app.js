@@ -1,790 +1,676 @@
-// ============================================================
-// Купон — фронтенд-логика.
-// Никаких фреймворков: обычный fetch к FastAPI backend (см. config.js),
-// ручное переключение между тремя экранами (список / создание / детали).
-// ============================================================
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+const viewport = $('viewport');
+const overlay = $('overlay');
+const overlayContext = overlay.getContext('2d');
+const measureCanvas = $('analysis-canvas');
+const measureContext = measureCanvas.getContext('2d', { willReadFrequently: true });
+const editCanvas = $('editor-canvas');
+const editContext = editCanvas.getContext('2d');
+const pages = ['camera', 'gallery', 'editor'];
+const classRu = { person: 'человек', dog: 'собака', cat: 'кошка', bird: 'птица', horse: 'лошадь', sheep: 'овца', cow: 'корова', elephant: 'слон', bear: 'медведь', zebra: 'зебра', giraffe: 'жираф', bicycle: 'велосипед', motorcycle: 'мотоцикл', car: 'автомобиль', bus: 'автобус', train: 'поезд', boat: 'лодка', 'potted plant': 'растение', flower: 'цветок', cake: 'торт', umbrella: 'зонт', backpack: 'рюкзак', handbag: 'сумка', bottle: 'бутылка', cup: 'чашка', 'sports ball': 'мяч', kite: 'воздушный змей', bench: 'скамейка', chair: 'стул', couch: 'диван', vase: 'ваза', book: 'книга', clock: 'часы', surfboard: 'доска для сёрфинга', snowboard: 'сноуборд', skateboard: 'скейтборд', 'dining table': 'стол', 'traffic light': 'светофор', 'fire hydrant': 'гидрант' };
+const state = { stream: null, track: null, detector: null, modelLoading: false, cameraFacing: 'environment', torchOn: false, lastDetect: 0, busy: false, detections: [], best: null, metrics: null, tilt: 0, level: false, levelAvailable: false, lastLevel: false, orientationSubscribed: false, autoExposure: true, manualMode: false, caps: {}, autoTimer: 0, photos: [], galleryUrls: [], activePhoto: null, activeImage: null, edit: { exposure: 0, contrast: 0, color: 0, preset: 'natural' }, toastTimer: 0, db: null };
 
-const API = window.API_BASE_URL;
-
-const state = {
-  portfolios: [],
-  currentPortfolioId: null,
-  lastRecommendationId: null,
-  draftBonds: [],       // бумаги, добавляемые при создании портфеля
-  draftHistoryFile: null,
-};
-
-// ---------------- Утилиты ----------------
-
-function $(sel) { return document.querySelector(sel); }
-function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
-
-function showToast(message, kind = "ok") {
-  const stack = $("#toast-stack");
-  const el = document.createElement("div");
-  el.className = `toast ${kind}`;
+function toast(message) {
+  const el = $('toast');
   el.textContent = message;
-  stack.appendChild(el);
-  setTimeout(() => el.remove(), 6000);
+  el.classList.add('show');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
-function fmtNum(v, digits = 2) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  return Number(v).toLocaleString("ru-RU", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+function setAiStatus(message, kind = '') {
+  const el = $('ai-status');
+  el.className = `ai-status ${kind}`;
+  el.innerHTML = `<i></i> ${message}`;
 }
 
-function fmtPct(v, digits = 2) {
-  if (v === null || v === undefined) return "—";
-  return `${fmtNum(v, digits)}%`;
-}
-
-function fmtDate(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-function riskLabel(risk) {
-  return { conservative: "Консервативный", moderate: "Умеренный", aggressive: "Агрессивный" }[risk] || risk;
-}
-
-async function api(path, options = {}) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const body = await res.json();
-      detail = body.detail || JSON.stringify(body);
-    } catch (_) { /* noop */ }
-    throw new Error(detail);
+function showPage(name) {
+  document.querySelectorAll('.page').forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
+  document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.page === name));
+  if (name !== 'camera') stopCamera();
+  if (name === 'gallery') renderGallery();
+  if (name === 'editor') {
+    if (state.activePhoto && !state.activeImage) openEditor(state.activePhoto);
+    resizeEditor();
   }
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return res.json();
-  return res;
-}
-
-// ---------------- Навигация между экранами ----------------
-
-function showScreen(id) {
-  $$(".screen").forEach(s => s.hidden = true);
-  $(`#${id}`).hidden = false;
-}
-
-// ---------------- Проверка соединения ----------------
-
-async function checkConnection() {
-  const pill = $("#conn-status");
-  try {
-    await api("/api/health");
-    pill.classList.add("ok");
-    pill.classList.remove("err");
-    pill.innerHTML = `<span class="dot"></span> backend подключён`;
-    return true;
-  } catch (e) {
-    pill.classList.add("err");
-    pill.classList.remove("ok");
-    pill.innerHTML = `<span class="dot"></span> нет связи с backend (${API})`;
-    return false;
+  if (name === 'camera' && !state.stream) {
+    viewport.classList.remove('live');
+    $('start-card').hidden = false;
   }
 }
 
-// ---------------- Экран: список портфелей ----------------
-
-async function loadPortfolioList() {
-  const grid = $("#portfolio-grid");
-  const empty = $("#empty-state");
-  try {
-    const portfolios = await api("/api/portfolios");
-    state.portfolios = portfolios;
-    grid.innerHTML = "";
-    if (portfolios.length === 0) {
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
-    for (const p of portfolios) {
-      const card = document.createElement("div");
-      card.className = "portfolio-card";
-      card.innerHTML = `
-        <div class="portfolio-card-top">
-          <h3 class="portfolio-card-name">${escapeHtml(p.name)}</h3>
-          <span class="portfolio-card-risk risk-${p.risk_profile}">${riskLabel(p.risk_profile)}</span>
-        </div>
-        <div class="portfolio-card-meta">
-          <div class="portfolio-card-meta-row"><span class="label">Бумаг</span><span class="value">${p.bonds.length}</span></div>
-          <div class="portfolio-card-meta-row"><span class="label">Бюджет</span><span class="value">${p.budget_rub ? fmtNum(p.budget_rub, 0) + " ₽" : "—"}</span></div>
-          <div class="portfolio-card-meta-row"><span class="label">Обновлён</span><span class="value">${p.last_run_at ? fmtDate(p.last_run_at) : "ещё не запускался"}</span></div>
-        </div>
-        ${p.is_active ? '<div class="portfolio-card-active-badge"><span class="dot"></span> автообновление активно</div>' : ''}
-      `;
-      card.addEventListener("click", () => openPortfolioDetail(p.id));
-      grid.appendChild(card);
-    }
-  } catch (e) {
-    showToast(`Не удалось загрузить портфели: ${e.message}`, "err");
-  }
-}
-
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str ?? "";
-  return div.innerHTML;
-}
-
-// ---------------- Экран: создание портфеля ----------------
-
-function resetCreateForm() {
-  $("#f-name").value = "Мой портфель";
-  $("#f-budget").value = "";
-  $("#f-horizon").value = "";
-  $("#f-risk").value = "moderate";
-  $("#f-max-positions").value = "8";
-  $("#f-notes").value = "";
-  $("#f-isin").value = "";
-  $("#f-bond-name").value = "";
-  state.draftBonds = [];
-  state.draftHistoryFile = null;
-  $("#file-drop-label").textContent = "Выбрать файл bonds_history.xlsx";
-  renderDraftBonds();
-}
-
-function renderDraftBonds() {
-  const list = $("#bond-draft-list");
-  list.innerHTML = "";
-  state.draftBonds.forEach((b, idx) => {
-    const li = document.createElement("li");
-    li.innerHTML = `<span>${escapeHtml(b.name || b.isin)} <span class="bd-isin">${escapeHtml(b.isin)}</span></span>`;
-    const btn = document.createElement("button");
-    btn.textContent = "×";
-    btn.addEventListener("click", () => {
-      state.draftBonds.splice(idx, 1);
-      renderDraftBonds();
-    });
-    li.appendChild(btn);
-    list.appendChild(li);
-  });
-}
-
-function addDraftBond() {
-  const isinInput = $("#f-isin");
-  const nameInput = $("#f-bond-name");
-  const isin = isinInput.value.trim().toUpperCase();
-  const name = nameInput.value.trim();
-  if (!isin) {
-    showToast("Введите ISIN бумаги", "err");
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast('Камера требует HTTPS и современный браузер');
     return;
   }
-  if (state.draftBonds.some(b => b.isin === isin)) {
-    showToast("Такой ISIN уже добавлен", "err");
-    return;
+  if (!state.orientationSubscribed) {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then((permission) => {
+        if (permission === 'granted') { window.addEventListener('deviceorientation', updateTilt); state.orientationSubscribed = true; }
+        else toast('Горизонт недоступен без разрешения датчика');
+      }).catch(() => toast('Нет доступа к датчику горизонта'));
+    } else { window.addEventListener('deviceorientation', updateTilt); state.orientationSubscribed = true; }
   }
-  state.draftBonds.push({ isin, name: name || undefined });
-  isinInput.value = "";
-  nameInput.value = "";
-  isinInput.focus();
-  renderDraftBonds();
-}
 
-async function submitNewPortfolio() {
-  if (state.draftBonds.length === 0) {
-    showToast("Добавьте хотя бы одну бумагу", "err");
-    return;
-  }
-  const payload = {
-    name: $("#f-name").value.trim() || "Мой портфель",
-    budget_rub: $("#f-budget").value ? Number($("#f-budget").value) : null,
-    risk_profile: $("#f-risk").value,
-    horizon_days: $("#f-horizon").value ? Number($("#f-horizon").value) : null,
-    max_positions: Number($("#f-max-positions").value) || 8,
-    notes: $("#f-notes").value.trim() || null,
-    bonds: state.draftBonds,
-    is_active: true,
-  };
-
-  const btn = $("#btn-create-portfolio");
-  btn.disabled = true;
-  btn.textContent = "Создаём…";
+  $('start-camera').disabled = true;
+  $('start-camera').textContent = 'ПОДКЛЮЧАЮ…';
+  $('start-card').hidden = false;
   try {
-    const portfolio = await api("/api/portfolios", { method: "POST", body: JSON.stringify(payload) });
-
-    if (state.draftHistoryFile) {
-      try {
-        const formData = new FormData();
-        formData.append("file", state.draftHistoryFile);
-        await fetch(`${API}/api/portfolios/${portfolio.id}/history/import`, { method: "POST", body: formData })
-          .then(r => { if (!r.ok) throw new Error("не удалось импортировать историю"); });
-        showToast("История успешно импортирована", "ok");
-      } catch (e) {
-        showToast(`Портфель создан, но история не импортировалась: ${e.message}`, "err");
-      }
-    }
-
-    showToast("Портфель создан. Запускаем первый расчёт…", "ok");
-    await openPortfolioDetail(portfolio.id);
-    await runNow(false); // первый прогон без ИИ-совета не запускаем автоматически — см. runNow(true) по кнопке
-  } catch (e) {
-    showToast(`Не удалось создать портфель: ${e.message}`, "err");
+    stopCamera();
+    state.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: state.cameraFacing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
+    state.track = state.stream.getVideoTracks()[0];
+    video.srcObject = state.stream;
+    await video.play();
+    viewport.classList.add('live');
+    $('start-card').hidden = true;
+    $('capture-button').disabled = false;
+    $('manual-button').disabled = false;
+    $('lens-button').disabled = false;
+    const settings = state.track.getSettings?.() || {};
+    $('resolution-tag').textContent = settings.width ? `${settings.width}×${settings.height}` : 'КАМЕРА';
+    inspectCapabilities();
+    setAiStatus('ИИ · загружается', '');
+    loadDetector();
+    drawLoop();
+  } catch (error) {
+    const message = error.name === 'NotAllowedError' ? 'Разреши доступ к камере в браузере' : error.name === 'NotFoundError' ? 'Камера не найдена' : 'Не удалось включить камеру';
+    $('scene-message').textContent = message;
+    toast(message);
+    setAiStatus('камера недоступна', 'error');
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Создать и запустить";
+    $('start-camera').disabled = false;
+    $('start-camera').innerHTML = 'ВКЛЮЧИТЬ КАМЕРУ <b>↗</b>';
   }
 }
 
-// ---------------- Экран: детали портфеля ----------------
-
-async function openPortfolioDetail(id) {
-  state.currentPortfolioId = id;
-  state.lastRecommendationId = null;
-  showScreen("screen-detail");
-  await refreshPortfolioDetail();
+function stopCamera() {
+  if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
+  state.stream = null;
+  state.track = null;
+  video.srcObject = null;
+  viewport.classList.remove('live');
+  $('capture-button').disabled = true;
+  $('manual-button').disabled = true;
+  $('lens-button').disabled = true;
+  if ($('control-sheet').open) $('control-sheet').close();
 }
 
-async function refreshPortfolioDetail() {
-  const id = state.currentPortfolioId;
-  if (!id) return;
-
-  try {
-    const p = await api(`/api/portfolios/${id}`);
-    $("#d-title").textContent = p.name;
-    $("#d-sub").textContent = `${riskLabel(p.risk_profile)} · ${p.bonds.length} бумаг` +
-      (p.budget_rub ? ` · бюджет ${fmtNum(p.budget_rub, 0)} ₽` : "");
-    $("#kpi-last-run").textContent = p.last_run_at ? fmtDate(p.last_run_at) : "ещё не запускался";
-
-    renderBondsTable(p.bonds);
-    await loadPositionsEditor(p);
-  } catch (e) {
-    showToast(`Не удалось загрузить портфель: ${e.message}`, "err");
-    return;
+function inspectCapabilities() {
+  state.manualMode = false;
+  state.autoExposure = true;
+  $('manual-mode').classList.remove('selected'); $('auto-mode').classList.add('selected');
+  state.caps = state.track?.getCapabilities?.() || {};
+  const settings = state.track?.getSettings?.() || {};
+  const caps = state.caps;
+  const lines = [];
+  if (caps.exposureCompensation) {
+    const range = $('ev-control');
+    range.min = caps.exposureCompensation.min ?? -2;
+    range.max = caps.exposureCompensation.max ?? 2;
+    range.step = caps.exposureCompensation.step ?? 0.1;
+    range.value = settings.exposureCompensation ?? 0;
+    range.disabled = false;
+    lines.push('экспокоррекция доступна');
+  } else {
+    $('ev-control').disabled = true;
+    lines.push('экспокоррекция — авто');
   }
-
-  await Promise.all([
-    loadLatestHistoryAndSignals(id),
-    loadLatestRecommendation(id),
-    loadHistoryTimeline(id),
-  ]);
-}
-
-async function loadPositionsEditor(portfolio) {
-  try {
-    const positions = await api(`/api/portfolios/${portfolio.id}/positions`);
-    const rec = await api(`/api/portfolios/${portfolio.id}/recommendations/latest`).catch(() => null);
-    state.lastRecommendationId = rec?.id ?? null;
-    const targets = Object.fromEntries((rec?.allocations_json || []).map(a => [a.isin, a]));
-    $("#position-budget").value = portfolio.budget_rub ?? "";
-    $("#position-cash").value = portfolio.cash_balance_rub ?? "";
-    $("#position-commission").value = portfolio.commission_rate === null || portfolio.commission_rate === undefined
-      ? "" : Number(portfolio.commission_rate) * 100;
-    $("#portfolio-notes").value = portfolio.notes ?? "";
-    $("#positions-editor").innerHTML = positions.map(p => `
-      <div class="position-edit-row">
-        <div class="position-edit-name">${escapeHtml(p.name)}</div>
-        <label><span>Факт, шт.</span><input type="number" min="0" step="1" data-position-isin="${escapeHtml(p.isin)}" data-position-field="quantity" value="${p.quantity || 0}"></label>
-        <label><span>Средняя цена, ₽/шт.</span><input type="number" min="0" step="0.01" data-position-isin="${escapeHtml(p.isin)}" data-position-field="average_price_rub" value="${p.average_price_rub ?? ""}" placeholder="не задана"></label>
-        <label><span>Цель, лоты</span><input type="number" min="0" step="1" data-target-isin="${escapeHtml(p.isin)}" value="${targets[p.isin]?.target_lots ?? 0}" ${rec ? "" : "disabled"}></label>
-      </div>`).join("") || `<p class="muted">Добавьте облигации для учёта позиций.</p>`;
-  } catch (e) {
-    showToast(`Не удалось загрузить позиции: ${e.message}`, "err");
+  const canManual = hasOption(caps.exposureMode, 'manual') && caps.iso && caps.exposureTime;
+  $('manual-mode').disabled = !canManual;
+  if (caps.iso) configureRange('iso-control', caps.iso, settings.iso, (value) => value, Math.round);
+  else $('iso-control').disabled = true;
+  if (caps.exposureTime) configureRange('shutter-control', { min: 0, max: 100 }, settings.exposureTime, secondsToSlider, sliderToSeconds);
+  else $('shutter-control').disabled = true;
+  $('iso-label').textContent = settings.iso ? `ISO ${settings.iso}` : 'АВТО';
+  $('shutter-label').textContent = settings.exposureTime ? formatShutter(settings.exposureTime) : 'АВТО';
+  $('ev-label').textContent = `${Number(settings.exposureCompensation || 0).toFixed(1)} EV`;
+  $('torch-button').hidden = !caps.torch;
+  if (caps.zoom) lines.push('зум есть');
+  $('zoom-row').hidden = !caps.zoom;
+  if (caps.zoom) {
+    const zoom = $('zoom-control');
+    zoom.min = caps.zoom.min ?? 1;
+    zoom.max = caps.zoom.max ?? 1;
+    zoom.step = caps.zoom.step ?? .1;
+    zoom.value = settings.zoom ?? zoom.min;
+    $('zoom-label').textContent = `${Number(zoom.value).toFixed(1)}×`;
   }
+  const shutterSupported = Boolean(caps.exposureTime);
+  if (canManual) lines.push('ручные ISO и выдержка поддерживаются');
+  else if (caps.iso || shutterSupported) lines.push('ручные настройки поддерживаются частично');
+  else lines.push('ручные ISO/выдержка скрыты: браузер их не даёт');
+  $('camera-support').textContent = `${lines.join(' · ')}. Показываю текущие значения камеры, когда они доступны.`;
+  refreshActualExposure();
 }
 
-async function savePositions() {
-  const id = state.currentPortfolioId;
-  if (!id) return;
-  const btn = $("#btn-save-positions");
-  btn.disabled = true;
+function hasOption(capability, item) { return Array.isArray(capability) && capability.includes(item); }
+function configureRange(id, range, current, fromValue, toValue) {
+  const input = $(id);
+  input.min = range.min ?? 0;
+  input.max = range.max ?? 100;
+  input.step = range.step ?? (id === 'iso-control' ? 1 : 'any');
+  const selected = current == null ? (Number(input.min) + Number(input.max)) / 2 : fromValue(current);
+  input.value = Number.isFinite(selected) ? Math.max(Number(input.min), Math.min(Number(input.max), selected)) : input.min;
+  input.disabled = state.manualMode ? false : id !== 'ev-control';
+  if (id === 'shutter-control') input.dataset.map = 'log';
+}
+function secondsToSlider(seconds) {
+  const range = state.caps.exposureTime;
+  if (!range || range.max <= range.min || range.min <= 0) return 50;
+  return 100 * Math.log(seconds / range.min) / Math.log(range.max / range.min);
+}
+function sliderToSeconds(slider) {
+  const range = state.caps.exposureTime;
+  if (!range || range.max <= range.min || range.min <= 0) return 1 / 125;
+  return range.min * Math.pow(range.max / range.min, Number(slider) / 100);
+}
+function formatShutter(seconds) {
+  if (!seconds) return 'АВТО';
+  if (seconds >= 1) return `${seconds.toFixed(1)} с`;
+  return `1/${Math.round(1 / seconds)} с`;
+}
+
+async function loadDetector() {
+  if (state.modelLoading || state.detector) return;
+  state.modelLoading = true;
+  $('scene-message').textContent = 'Загружаю бесплатную модель распознавания…';
   try {
-    const budgetText = $("#position-budget").value;
-    const budget = budgetText ? Number(budgetText) : null;
-    await api(`/api/portfolios/${id}/budget`, { method: "PATCH", body: JSON.stringify({ budget_rub: budget }) });
-    const cashText = $("#position-cash").value;
-    await api(`/api/portfolios/${id}/cash`, { method: "PATCH", body: JSON.stringify({ cash_balance_rub: cashText === "" ? null : Number(cashText) }) });
-    const commissionText = $("#position-commission").value;
-    await api(`/api/portfolios/${id}`, { method: "PATCH", body: JSON.stringify({
-      notes: $("#portfolio-notes").value || null,
-      commission_rate: commissionText === "" ? null : Number(commissionText) / 100,
-    }) });
-    const positions = [...document.querySelectorAll("[data-position-field='quantity']")].map(input => {
-      const isin = input.dataset.positionIsin;
-      const price = document.querySelector(`[data-position-isin="${isin}"][data-position-field="average_price_rub"]`).value;
-      return { isin, quantity: Number(input.value) || 0, average_price_rub: price ? Number(price) : null };
+    const visionApi = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1');
+    const vision = await visionApi.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
+    state.detector = await visionApi.ObjectDetector.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite' },
+      runningMode: 'VIDEO', maxResults: 8, scoreThreshold: 0.42,
     });
-    await api(`/api/portfolios/${id}/positions`, { method: "PUT", body: JSON.stringify({ positions }) });
-    const targetInputs = [...document.querySelectorAll("[data-target-isin]")];
-    if (state.lastRecommendationId && targetInputs.length) {
-      const targets = targetInputs.map(input => ({ isin: input.dataset.targetIsin, lots: Number(input.value) || 0 }));
-      await api(`/api/portfolios/${id}/recommendations/latest/targets`, {
-        method: "PUT", body: JSON.stringify({ targets }),
-      });
-    }
-    showToast("Бюджет, фактические позиции и целевые лоты сохранены", "ok");
-    await refreshPortfolioDetail();
-  } catch (e) {
-    showToast(`Не удалось сохранить капитал и позиции: ${e.message}`, "err");
-  } finally {
-    btn.disabled = false;
-  }
+    setAiStatus('ИИ · ищу кадр', 'ready');
+    $('scene-message').textContent = 'Наведи на объект — ищу удачную композицию';
+  } catch (error) {
+    console.warn('Photo Scout detector is unavailable', error);
+    setAiStatus('ИИ · без модели', 'error');
+    $('scene-message').textContent = 'Модель не загрузилась. Проверяю свет и горизонт без распознавания.';
+  } finally { state.modelLoading = false; }
 }
 
-function renderBondsTable(bonds, latestSnapshotByIsin = {}) {
-  const tbody = $("#bonds-table-body");
-  tbody.innerHTML = "";
-  for (const b of bonds) {
-    const snap = latestSnapshotByIsin[b.isin];
-    const tr = document.createElement("tr");
-    const displayYield = snap?.yield_buy_simple_pct ?? snap?.moex_yield_pct ?? snap?.yield_sell_simple_pct;
-    const yieldTag = snap?.yield_buy_simple_pct !== null && snap?.yield_buy_simple_pct !== undefined
-      ? `расчёт · после НДФЛ${snap.moex_yield_pct !== null && snap.moex_yield_pct !== undefined ? `<small class="yield-reference">MOEX ${fmtPct(snap.moex_yield_pct)}</small>` : ""}`
-      : (snap?.moex_yield_pct !== null && snap?.moex_yield_pct !== undefined ? "только MOEX" : "расчёт");
-    tr.innerHTML = `
-      <td>${escapeHtml(b.name)}</td>
-      <td class="mono">${escapeHtml(b.isin)}</td>
-      <td class="num yield-cell">${snap ? fmtPct(displayYield) : "—"}</td>
-      <td>${snap ? `<span class="src-tag src-fallback">${yieldTag}</span>` : "—"}</td>
-      <td class="num mono">${snap ? fmtNum(snap.buy_total_rub ?? snap.buy_price_rub, 2) + " ₽" : "—"}</td>
-      <td>${snap ? `<span class="${snap.had_live_quotes ? 'live-yes' : 'live-no'}">${snap.had_live_quotes ? '● live' : '○ last'}</span>` : "—"}</td>
-      <td></td>
-    `;
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "row-remove-btn";
-    removeBtn.textContent = "×";
-    removeBtn.title = "Убрать из портфеля";
-    removeBtn.addEventListener("click", () => removeBondFromPortfolio(b.id));
-    tr.lastElementChild.appendChild(removeBtn);
-    tbody.appendChild(tr);
-  }
-}
-
-async function removeBondFromPortfolio(holdingId) {
-  const id = state.currentPortfolioId;
-  try {
-    await api(`/api/portfolios/${id}/bonds/${holdingId}`, { method: "DELETE" });
-    showToast("Бумага удалена из портфеля", "ok");
-    await refreshPortfolioDetail();
-  } catch (e) {
-    showToast(`Не удалось удалить бумагу: ${e.message}`, "err");
-  }
-}
-
-async function loadLatestHistoryAndSignals(portfolioId) {
-  try {
-    const history = await api(`/api/portfolios/${portfolioId}/history?limit=1`);
-    if (history.length === 0) {
-      $("#kpi-usd").textContent = "—";
-      $("#kpi-bonds").textContent = "—";
-      $("#kpi-live").textContent = "—";
-      $("#matrix-wrap").innerHTML = `<p class="muted">Пока нет данных. Запустите расчёт.</p>`;
-      $("#signals-table-body").innerHTML = "";
-      return;
-    }
-    const latest = history[0];
-    $("#kpi-usd").textContent = latest.usd_rub ? fmtNum(latest.usd_rub, 4) : "—";
-    $("#kpi-bonds").textContent = latest.num_bonds ?? "—";
-    $("#kpi-live").textContent = latest.live_quotes_share !== null && latest.live_quotes_share !== undefined
-      ? fmtPct(latest.live_quotes_share * 100, 0) : "—";
-
-    const byIsin = {};
-    for (const b of latest.bonds) byIsin[b.isin] = b;
-    const p = state.portfolios.find(x => x.id === portfolioId) || (await api(`/api/portfolios/${portfolioId}`));
-    renderBondsTable(p.bonds, byIsin);
-
-    const signals = await api(`/api/portfolios/${portfolioId}/runs/${latest.run_id}/signals`);
-    renderMatrix(latest.bonds, signals);
-    await renderSignalsTable(portfolioId, latest.run_id);
-
-    if (latest.status === "error") {
-      showRunBanner(latest.message || "Ошибка при получении данных с MOEX", "err");
-    } else if (latest.status === "partial") {
-      showRunBanner(latest.message || "Часть бумаг не удалось получить", "warn");
-    } else {
-      hideRunBanner();
-    }
-  } catch (e) {
-    showToast(`Не удалось загрузить историю: ${e.message}`, "err");
-  }
-}
-
-function showRunBanner(msg, kind) {
-  const el = $("#run-banner");
-  el.hidden = false;
-  el.className = `run-banner ${kind}`;
-  el.textContent = msg;
-}
-function hideRunBanner() {
-  $("#run-banner").hidden = true;
-}
-
-function renderMatrix(bonds, relations) {
-  const wrap = $("#matrix-wrap");
-  const names = bonds.map(b => b.name);
-  if (names.length === 0) {
-    wrap.innerHTML = `<p class="muted">Нет данных по бумагам.</p>`;
+function drawLoop() {
+  if (!state.stream || !video.videoWidth) {
+    if (state.stream) requestAnimationFrame(drawLoop);
     return;
   }
-
-  const relMap = {};
-  for (const r of relations) relMap[`${r.seller}||${r.buyer}`] = r.relation;
-
-  let html = `<table class="matrix-table"><thead><tr><th></th>`;
-  for (const n of names) html += `<th>${escapeHtml(truncate(n, 10))}</th>`;
-  html += `</tr></thead><tbody>`;
-
-  for (const seller of names) {
-    html += `<tr><th class="row-head">${escapeHtml(truncate(seller, 14))}</th>`;
-    for (const buyer of names) {
-      const val = relMap[`${seller}||${buyer}`];
-      const isDiag = seller === buyer;
-      const bg = isDiag ? "" : heatColor(val);
-      html += `<td class="${isDiag ? 'diag' : ''}" style="${bg ? `background:${bg}` : ''}">
-        <span class="matrix-cell-value">${val !== undefined ? val.toFixed(3) : '—'}</span>
-      </td>`;
-    }
-    html += `</tr>`;
-  }
-  html += `</tbody></table>`;
-  wrap.innerHTML = html;
+  drawOverlay();
+  if (Date.now() - state.lastDetect > 600 && !state.busy && state.detector) detectFrame();
+  if (Date.now() - (state.metrics?.time || 0) > 500) measureFrame();
+  if (state.stream) requestAnimationFrame(drawLoop);
 }
 
-function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
-
-function heatColor(val) {
-  if (val === undefined || val === null || val === 0) return "";
-  // val около 1.0 = нейтрально; выше 1.025 = зелёная подсветка (сигнал), ниже 0.975 = красноватая
-  if (val >= 1.05) return "rgba(94,234,212,0.35)";
-  if (val >= 1.025) return "rgba(94,234,212,0.18)";
-  if (val <= 0.95) return "rgba(240,119,107,0.22)";
-  if (val <= 0.975) return "rgba(240,119,107,0.10)";
-  return "";
-}
-
-async function renderSignalsTable(portfolioId, runId) {
-  // Сигналы (со статусами) пересчитываются на лету пайплайном при запуске;
-  // для отображения последнего прогона показываем relation-таблицу отсортированной
-  // по отклонению от 1.0, чтобы самые примечательные пары были видны сверху.
-  const relations = await api(`/api/portfolios/${portfolioId}/runs/${runId}/signals`);
-  const tbody = $("#signals-table-body");
-  tbody.innerHTML = "";
-
-  const notable = relations
-    .filter(r => r.seller !== r.buyer && r.quotes_live)
-    .filter(r => r.gain_pct !== null && r.gain_pct >= (r.min_gain_pct || 1.0))
-    .sort((a, b) => (b.gain_pct || 0) - (a.gain_pct || 0))
-    .slice(0, 15);
-
-  if (notable.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">Нет обменов с расчётной выгодой выше минимального порога за выбранный горизонт.</td></tr>`;
-    return;
-  }
-
-  for (const r of notable) {
-    const tr = document.createElement("tr");
-    const statusClass = r.gain_pct >= (r.min_gain_pct || 1.0) ? "status-signal" : "status-neutral";
-    const statusText = r.gain_pct >= (r.min_gain_pct || 1.0) ? "выше порога" : "обычный";
-    tr.innerHTML = `
-      <td>${escapeHtml(r.seller)}</td>
-      <td>${escapeHtml(r.buyer)}</td>
-      <td class="num mono">${r.relation.toFixed(3)}</td>
-      <td class="num mono">${fmtPct(r.gain_pct, 2)} / ${r.comparison_days} дн.</td>
-      <td class="num mono">—</td>
-      <td><span class="status-tag ${statusClass}">${statusText}</span></td>
-      <td class="muted">Чистая разница доходностей за горизонт удержания старой бумаги. Порог учитывает заданную брокерскую комиссию.</td>
-    `;
-    tbody.appendChild(tr);
-  }
-}
-
-async function loadLatestRecommendation(portfolioId) {
+function detectFrame() {
+  if (!state.detector || state.busy || !state.stream) return;
+  state.busy = true;
+  state.lastDetect = Date.now();
   try {
-    const rec = await api(`/api/portfolios/${portfolioId}/recommendations/latest`);
-    if (!rec) {
-      state.lastRecommendationId = null;
-      $("#rec-summary").textContent = "Рекомендаций пока нет — запустите расчёт.";
-      $("#rec-model-badge").textContent = "—";
-      $("#portfolio-risk-summary").textContent = "";
-      $("#alloc-list").innerHTML = "";
-      $("#rebalance-plan").innerHTML = "";
-      $("#warnings-list").innerHTML = "";
-      return;
-    }
-    state.lastRecommendationId = rec.id;
-    $("#rec-summary").textContent = rec.summary || "—";
-    $("#rec-model-badge").textContent = rec.model_used || "—";
-    $("#kpi-expected-yield").textContent = rec.expected_yield_pct !== null && rec.expected_yield_pct !== undefined
-      ? fmtPct(rec.expected_yield_pct) : "—";
-    const risk = rec.rebalance_json?.risk_summary;
-    if (risk) {
-      const profileNames = { conservative: "консервативный", moderate: "умеренный", aggressive: "агрессивный" };
-      const durationStress = risk.estimated_portfolio_price_change_pct_per_1pp_rate_move === null || risk.estimated_portfolio_price_change_pct_per_1pp_rate_move === undefined
-        ? "чувствительность к ставке не оценена"
-        : `оценка при росте рыночных доходностей на 1 п.п.: ${fmtPct(risk.estimated_portfolio_price_change_pct_per_1pp_rate_move, 2)} по цене`;
-      const spread = risk.weighted_bid_ask_spread_pct === null || risk.weighted_bid_ask_spread_pct === undefined
-        ? "спред BID–OFFER недоступен" : `средний спред BID–OFFER ${fmtPct(risk.weighted_bid_ask_spread_pct, 3)}`;
-      const dispersion = risk.weighted_yield_history_dispersion_pct === null || risk.weighted_yield_history_dispersion_pct === undefined
-        ? "нет истории для оценки разброса доходностей" : `разброс исторических доходностей ${fmtPct(risk.weighted_yield_history_dispersion_pct, 2)} (не волатильность полной доходности)`;
-      const duration = risk.weighted_duration_years === null || risk.weighted_duration_years === undefined
-        ? "дюрация недоступна" : `взвешенная дюрация ${fmtNum(risk.weighted_duration_years, 2)} лет`;
-      const horizonMismatch = risk.weighted_horizon_mismatch_years === null || risk.weighted_horizon_mismatch_years === undefined || risk.weighted_horizon_mismatch_years === 0
-        ? "" : `средний разрыв дюрации с горизонтом ${fmtNum(risk.weighted_horizon_mismatch_years, 2)} лет`;
-      const issuer = risk.max_known_issuer_exposure_pct === null || risk.max_known_issuer_exposure_pct === undefined
-        ? "концентрацию эмитента MOEX не удалось проверить" : `максимальная доля известного эмитента ${fmtPct(risk.max_known_issuer_exposure_pct, 1)}`;
-      const ratingCoverage = risk.unknown_rating_positions === undefined
-        ? "" : `рейтинг MOEX есть у ${Math.max(0, (risk.selected_bonds || 0) - risk.unknown_rating_positions)} из ${risk.selected_bonds || 0} выпусков`;
-      const caps = risk.effective_max_position_pct === undefined
-        ? "" : `лимит одной бумаги ${fmtPct(risk.effective_max_position_pct, 1)}, лимит эмитента ${fmtPct(risk.effective_max_issuer_pct, 1)}`;
-      $("#portfolio-risk-summary").textContent = `Риск-профиль: ${profileNames[risk.risk_profile] || "умеренный"}. Итоговые доли рассчитаны с учетом чистой доходности, дюрации относительно горизонта, BID–OFFER-спреда, истории и доступной оценки рейтинга, затем округлены до лотов. ${caps}; ${duration}; ${horizonMismatch}; ${durationStress}; ${spread}; ${dispersion}; ${issuer}. ${ratingCoverage}. Стресс-оценка линейная и не является прогнозом.`;
-    } else {
-      $("#portfolio-risk-summary").textContent = "";
-    }
+    const result = state.detector.detectForVideo(video, performance.now());
+    state.detections = result.detections || [];
+    chooseSubject();
+    renderAdvice();
+  } catch (error) {
+    console.warn('Frame detection failed', error);
+  } finally { state.busy = false; }
+}
 
-    const allocList = $("#alloc-list");
-    allocList.innerHTML = "";
-    const allocations = rec.allocations_json || [];
-    for (const a of allocations) {
-      const row = document.createElement("div");
-      row.className = "alloc-row";
-      const metrics = a.risk_metrics || {};
-      const riskParts = [];
-      if (metrics.duration_years !== null && metrics.duration_years !== undefined) riskParts.push(`дюрация ${fmtNum(metrics.duration_years, 2)} г.`);
-      if (metrics.bid_ask_spread_pct !== null && metrics.bid_ask_spread_pct !== undefined) riskParts.push(`BID–OFFER ${fmtPct(metrics.bid_ask_spread_pct, 3)}`);
-      if (metrics.yield_history_dispersion_pct !== null && metrics.yield_history_dispersion_pct !== undefined) riskParts.push(`разброс доходностей ${fmtPct(metrics.yield_history_dispersion_pct, 2)}`);
-      if (metrics.credit_rating) riskParts.push(`рейтинг ${metrics.credit_rating}`);
-      row.innerHTML = `
-        <div>
-          <div class="alloc-name">${escapeHtml(a.name || a.isin)}</div>
-          <div class="alloc-rationale">${escapeHtml(a.rationale || "")}</div>
-          ${riskParts.length ? `<div class="alloc-risk">${riskParts.map(escapeHtml).join(" · ")}</div>` : ""}
-        </div>
-        <div class="alloc-weight">${fmtPct(a.weight_pct, 1)}</div>
-        <div class="alloc-amount">${a.target_lots !== undefined ? `${a.target_lots} лот. · ${a.target_shares} шт. · ${fmtNum(a.target_amount_rub, 0)} ₽` : (a.amount_rub ? fmtNum(a.amount_rub, 0) + " ₽" : "")}</div>
-        <div class="alloc-bar-track"><div class="alloc-bar-fill" style="width:${Math.min(100, a.weight_pct || 0)}%"></div></div>
-      `;
-      allocList.appendChild(row);
+function chooseSubject() {
+  if (!state.detections.length) { state.best = null; return; }
+  const width = video.videoWidth;
+  const height = video.videoHeight;
+  const viewportRect = viewport.getBoundingClientRect();
+  const scale = Math.max(viewportRect.width / width, viewportRect.height / height);
+  const cropX = (viewportRect.width - width * scale) / 2;
+  const cropY = (viewportRect.height - height * scale) / 2;
+  const nodes = [.333, .667];
+  state.detections = state.detections.map((detection) => {
+    const box = detection.boundingBox;
+    const x = ((box.originX + box.width / 2) * scale + cropX) / viewportRect.width;
+    const y = ((box.originY + box.height / 2) * scale + cropY) / viewportRect.height;
+    const area = Math.min(1, box.width * scale * box.height * scale / (viewportRect.width * viewportRect.height));
+    let nearest = { distance: Infinity, x: .5, y: .5 };
+    for (const nx of nodes) for (const ny of nodes) {
+      const distance = Math.hypot(x - nx, y - ny);
+      if (distance < nearest.distance) nearest = { distance, x: nx, y: ny };
     }
-    renderRebalancePlan(rec.rebalance_json);
-    $("#warnings-list").innerHTML = (rec.rebalance_json?.warnings || []).map(w => `<div class="warning-item">⚠ ${escapeHtml(w)}</div>`).join("");
-  } catch (e) {
-    $("#rec-summary").textContent = "Рекомендаций пока нет — нажмите «Обновить сейчас».";
-    $("#rec-model-badge").textContent = "—";
-    $("#alloc-list").innerHTML = "";
-    $("#rebalance-plan").innerHTML = "";
+    const category = detection.categories?.[0];
+    const subjectValue = category?.score || 0;
+    const framing = Math.max(0, 1 - nearest.distance / .55);
+    const areaValue = area < .015 ? .35 : area > .58 ? .35 : area > .32 ? .75 : 1;
+    return { detection, category, box, x, y, area, target: nearest, framing, rank: subjectValue * .42 + framing * .4 + areaValue * .18 };
+  }).sort((a, b) => b.rank - a.rank);
+  state.best = state.detections[0];
+}
+
+function drawOverlay() {
+  const rect = viewport.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const pixelW = Math.max(1, Math.round(rect.width * dpr));
+  const pixelH = Math.max(1, Math.round(rect.height * dpr));
+  if (overlay.width !== pixelW || overlay.height !== pixelH) { overlay.width = pixelW; overlay.height = pixelH; }
+  overlayContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const ctx = overlayContext;
+  const width = rect.width;
+  const height = rect.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.strokeStyle = '#e7ffb266';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 5]);
+  for (const p of [1 / 3, 2 / 3]) { ctx.beginPath(); ctx.moveTo(width * p, 0); ctx.lineTo(width * p, height); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, height * p); ctx.lineTo(width, height * p); ctx.stroke(); }
+  ctx.setLineDash([]);
+  const tilt = Math.max(-25, Math.min(25, state.tilt));
+  ctx.save(); ctx.translate(width / 2, height / 2); ctx.rotate(tilt * Math.PI / 180);
+  ctx.strokeStyle = state.level ? '#d9ff5a' : '#ffc56e'; ctx.lineWidth = state.level ? 2 : 1;
+  ctx.beginPath(); ctx.moveTo(-width * .31, 0); ctx.lineTo(width * .31, 0); ctx.stroke();
+  ctx.fillStyle = state.level ? '#d9ff5a' : '#ffc56e';
+  ctx.fillRect(-3, -3, 6, 6); ctx.restore();
+
+  const scale = Math.max(width / video.videoWidth, height / video.videoHeight);
+  const offsetX = (width - video.videoWidth * scale) / 2;
+  const offsetY = (height - video.videoHeight * scale) / 2;
+  for (const subject of state.detections) {
+    const box = subject.box;
+    const x = box.originX * scale + offsetX;
+    const y = box.originY * scale + offsetY;
+    const w = box.width * scale;
+    const h = box.height * scale;
+    const selected = subject === state.best;
+    ctx.strokeStyle = selected ? '#d9ff5a' : '#78e0d0bb';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(x, y, w, h);
+    if (selected) {
+      const name = localized(subject.category?.categoryName || 'объект');
+      const badge = `${name.toUpperCase()} ${Math.round((subject.category?.score || 0) * 100)}%`;
+      ctx.font = '600 9px monospace';
+      const tw = ctx.measureText(badge).width + 12;
+      ctx.fillStyle = '#d9ff5a'; ctx.fillRect(x, Math.max(0, y - 21), tw, 18);
+      ctx.fillStyle = '#12191d'; ctx.fillText(badge, x + 6, Math.max(12, y - 9));
+      const tx = (subject.target.x * video.videoWidth * scale) + offsetX;
+      const ty = (subject.target.y * video.videoHeight * scale) + offsetY;
+      ctx.fillStyle = '#d9ff5a'; ctx.beginPath(); ctx.arc(tx, ty, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#12191d'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(tx, ty, 8, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function localized(name) { return classRu[name] || name.replace(/_/g, ' '); }
+
+function measureFrame() {
+  const width = measureCanvas.width;
+  const height = measureCanvas.height;
+  measureContext.drawImage(video, 0, 0, width, height);
+  const pixels = measureContext.getImageData(0, 0, width, height).data;
+  let luminance = 0;
+  let clipped = 0;
+  const gray = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < pixels.length; i += 4, p++) {
+    const light = .2126 * pixels[i] + .7152 * pixels[i + 1] + .0722 * pixels[i + 2];
+    gray[p] = light;
+    luminance += light;
+    if (light < 13 || light > 247) clipped++;
+  }
+  let laplace = 0;
+  let count = 0;
+  for (let y = 1; y < height - 1; y += 2) for (let x = 1; x < width - 1; x += 2) {
+    const at = y * width + x;
+    laplace += Math.abs(-4 * gray[at] + gray[at - 1] + gray[at + 1] + gray[at - width] + gray[at + width]);
+    count++;
+  }
+  const average = luminance / (width * height);
+  const sharpness = laplace / count;
+  const clipping = clipped / (width * height);
+  state.metrics = { average, sharpness, clipping, time: Date.now() };
+  updateQuality();
+  if (state.autoExposure && !state.manualMode && state.caps.exposureCompensation && Date.now() - state.autoTimer > 1900) {
+    const desired = average < 75 ? .7 : average > 180 || clipping > .18 ? -.5 : 0;
+    const settings = state.track?.getSettings?.() || {};
+    if (Math.abs(Number(settings.exposureCompensation || 0) - desired) >= .3) applyExposure(desired, true);
   }
 }
 
-async function checkForNewRecommendation() {
-  const id = state.currentPortfolioId;
-  if (!id || $("#screen-detail").hidden || document.hidden) return;
+function updateQuality() {
+  const metrics = state.metrics;
+  if (!metrics) return;
+  const { average, sharpness, clipping } = metrics;
+  const exposure = Math.max(0, 1 - Math.abs(average - 120) / 125) * 100;
+  const focus = sharpness > 14 ? 96 : sharpness > 8 ? 80 : sharpness > 4 ? 57 : 28;
+  const scene = state.best ? state.best.framing * 100 : 54;
+  const horizon = !state.levelAvailable ? 65 : state.level ? 100 : Math.max(28, 100 - Math.abs(state.tilt) * 5);
+  const score = Math.round(exposure * .34 + focus * .2 + scene * .34 + horizon * .12 - clipping * 30);
+  $('score-badge').querySelector('b').textContent = score;
+  $('score-badge').style.borderColor = score >= 78 ? '#d9ff5a99' : '#ffffff29';
+  $('light-readout').textContent = average < 65 ? 'ТЕМНО' : average > 190 ? 'ЯРКО' : 'ХОРОШО';
+  $('sharp-readout').textContent = sharpness < 5 ? 'СМАЗАНО?' : sharpness > 11 ? 'РЕЗКО' : 'СРЕДНЕ';
+  const settings = state.track?.getSettings?.() || {};
+  $('exposure-readout').textContent = settings.iso ? `ISO${Math.round(settings.iso)}` : 'АВТО';
+  $('scene-note').classList.toggle('good', score >= 78);
+}
+
+function renderAdvice() {
+  const metrics = state.metrics;
+  const subject = state.best;
+  const messages = [];
+  if (metrics?.average < 65) messages.push('Темновато: найди свет или открой экспозицию');
+  else if (metrics?.average > 190 || metrics?.clipping > .18) messages.push('Светлые участки теряются — убавь экспозицию');
+  if (metrics?.sharpness < 4.5) messages.push('Похоже на смаз — задержи телефон');
+  if (state.levelAvailable && !state.level) messages.push('Поверни телефон, чтобы выровнять горизонт');
+  if (subject) {
+    const name = localized(subject.category?.categoryName || 'объект');
+    const confidence = Math.round((subject.category?.score || 0) * 100);
+    if (subject.area < .012) messages.push(`${name} далеко — подойди ближе`);
+    else if (subject.area > .58) messages.push(`${name} почти заполняет кадр — отступи`);
+    else if (subject.framing < .55) {
+      const pan = subject.target.x > subject.x ? 'чуть левее' : 'чуть правее';
+      const tilt = subject.target.y > subject.y ? 'и чуть выше' : 'и чуть ниже';
+      messages.push(`Помести ${name} на точку третей: сдвинь камеру ${pan} ${tilt}`);
+    } else messages.push(`${name} найден · уверенность ${confidence}% · удачная точка третей`);
+  } else if (state.detector && !messages.some((message) => message.includes('Темновато'))) {
+    messages.push('Веди камерой — найду объект для композиции');
+  }
+  const message = messages[0] || 'Хороший свет. Ищи интересный передний план.';
+  $('scene-message').textContent = message;
+  $('scene-note').classList.toggle('good', Boolean(subject && subject.framing > .72 && metrics?.average > 65 && state.level));
+}
+
+function updateTilt(event) {
+  state.levelAvailable = true;
+  const orientation = screen.orientation?.angle || 0;
+  const raw = orientation === 90 ? -(event.beta || 0) : orientation === 270 ? (event.beta || 0) : (event.gamma || 0);
+  state.tilt = Math.max(-45, Math.min(45, raw));
+  state.level = Math.abs(state.tilt) < 1.3;
+  if (state.level && !state.lastLevel) navigator.vibrate?.(25);
+  state.lastLevel = state.level;
+  $('level-number').textContent = `${Math.round(state.tilt)}°`;
+  $('level-indicator').style.transform = `translateX(${Math.max(-13, Math.min(13, state.tilt * .7))}px)`;
+  if (state.metrics) { updateQuality(); renderAdvice(); }
+}
+
+async function applyExposure(value, automatic = false) {
+  if (!state.track || !state.caps.exposureCompensation) return;
+  const range = state.caps.exposureCompensation;
+  const target = Math.max(range.min ?? -2, Math.min(range.max ?? 2, Number(value)));
   try {
-    const rec = await api(`/api/portfolios/${id}/recommendations/latest`);
-    if (state.lastRecommendationId !== null && rec.id !== state.lastRecommendationId) {
-      state.lastRecommendationId = rec.id;
-      showToast("Появился новый план после внутридневной проверки рынка", "ok");
-      await refreshPortfolioDetail();
-    }
+    await state.track.applyConstraints({ advanced: [{ exposureCompensation: target }] });
+    state.autoTimer = Date.now();
+    $('ev-control').value = target;
+    $('ev-label').textContent = `${target > 0 ? '+' : ''}${target.toFixed(1)} EV`;
+    refreshActualExposure();
   } catch (_) {
-    // Пустой портфель может ещё не иметь рекомендации.
+    if (automatic) state.autoTimer = Date.now();
+    if (!automatic) toast('Камера отказалась менять экспозицию');
   }
 }
 
-function renderRebalancePlan(plan) {
-  const wrap = $("#rebalance-plan");
-  if (!plan) { wrap.innerHTML = ""; return; }
-  const orderText = plan.orders?.length ? plan.orders.map(o => {
-    const side = o.side === "SELL" ? "Продать" : "Купить";
-    const cash = Math.abs(o.estimated_cash_rub || 0);
-    const pnl = o.estimated_pnl_rub === null || o.estimated_pnl_rub === undefined ? "" : ` · оценка P/L ${fmtNum(o.estimated_pnl_rub, 0)} ₽`;
-    return `<div class="order-row ${o.side.toLowerCase()}"><strong>${side}</strong> ${escapeHtml(o.name)} — ${o.lots} лот. (${o.shares} шт.) · ${fmtNum(cash, 0)} ₽${pnl}${o.quote_live ? "" : " · LAST, цена ориентировочная"}</div>`;
-  }).join("") : `<p class="muted">Сделок по целевым долям не требуется.</p>`;
-  const gain = plan.best_switch_gain_pct === null || plan.best_switch_gain_pct === undefined
-    ? "" : ` · максимальная выгода обмена ${fmtPct(plan.best_switch_gain_pct, 2)}`;
-  const cashReason = plan.cash_left_reason ? `<p class="card-hint">${escapeHtml(plan.cash_left_reason)}</p>` : "";
-  wrap.innerHTML = `<h4>План сделок (вручную)</h4>${orderText}<div class="cash-left">Останется свободно: <strong>${fmtNum(plan.cash_left_rub, 0)} ₽</strong>${gain}</div>${cashReason}<p class="card-hint">Оценка по текущим котировкам; заявки не отправляются брокеру.</p>`;
+function refreshActualExposure() {
+  const settings = state.track?.getSettings?.() || {};
+  $('iso-label').textContent = settings.iso ? `ISO ${Math.round(settings.iso)}` : 'АВТО';
+  $('shutter-label').textContent = settings.exposureTime ? formatShutter(settings.exposureTime) : 'АВТО';
+  $('ev-label').textContent = `${Number(settings.exposureCompensation || 0).toFixed(1)} EV`;
+  if (state.metrics) updateQuality();
 }
 
-async function importHistoryForCurrentPortfolio(file) {
-  const id = state.currentPortfolioId;
-  if (!id || !file) return;
-  try {
-    const formData = new FormData();
-    formData.append("file", file);
-    const response = await fetch(`${API}/api/portfolios/${id}/history/import`, { method: "POST", body: formData });
-    if (!response.ok) {
-      const detail = await response.json().catch(() => ({}));
-      throw new Error(detail.detail || "не удалось импортировать файл");
-    }
-    const summary = await response.json();
-    showToast(`Импортировано снимков: ${summary.runs_imported}; исторических доходностей: ${summary.bond_yield_rows_imported}`, "ok");
-    await refreshPortfolioDetail();
-  } catch (e) {
-    showToast(`Не удалось импортировать историю: ${e.message}`, "err");
-  } finally {
-    $("#f-import-history").value = "";
-  }
-}
-
-async function loadHistoryTimeline(portfolioId) {
-  try {
-    const history = await api(`/api/portfolios/${portfolioId}/history?limit=20`);
-    const wrap = $("#history-timeline");
-    wrap.innerHTML = "";
-    if (history.length === 0) {
-      wrap.innerHTML = `<p class="muted">История пуста — запустите первый расчёт.</p>`;
-      return;
-    }
-    for (const h of history) {
-      const statusClass = { ok: "hs-ok", partial: "hs-partial", error: "hs-error", imported: "hs-imported" }[h.status] || "hs-ok";
-      const item = document.createElement("div");
-      item.className = "history-item";
-      item.innerHTML = `
-        <span class="history-date">${fmtDate(h.run_at)}</span>
-        <span class="history-meta"><span class="history-status-dot ${statusClass}"></span>${h.num_bonds} бумаг · живых котировок ${h.live_quotes_share !== null ? fmtPct(h.live_quotes_share * 100, 0) : "—"}</span>
-        <span class="mono" style="color:var(--text-faint); font-size:11px;">${h.usd_rub ? "USD/RUB " + fmtNum(h.usd_rub, 2) : ""}</span>
-      `;
-      wrap.appendChild(item);
-    }
-  } catch (e) {
-    showToast(`Не удалось загрузить историю обновлений: ${e.message}`, "err");
-  }
-}
-
-async function runNow(callAdvisor = true) {
-  const id = state.currentPortfolioId;
-  if (!id) return;
-  const btn = $("#btn-run-now");
-  btn.disabled = true;
-  btn.textContent = "Считаем…";
-  try {
-    const result = await api(`/api/portfolios/${id}/run?call_advisor=${callAdvisor}`, { method: "POST" });
-    if (result.status === "error") {
-      showRunBanner(result.message, "err");
-      showToast("Расчёт завершился с ошибкой — см. баннер выше", "err");
-    } else if (result.status === "partial") {
-      showRunBanner(result.message || "Часть бумаг не получена", "warn");
-      showToast("Расчёт завершён частично", "ok");
-    } else {
-      hideRunBanner();
-      showToast("Расчёт успешно завершён", "ok");
-    }
-    if (result.advisor_error) {
-      showToast(`ИИ-советник недоступен: ${result.advisor_error}`, "err");
-    }
-    await refreshPortfolioDetail();
-  } catch (e) {
-    showToast(`Ошибка запуска расчёта: ${e.message}`, "err");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Пересчитать ребалансировку";
-  }
-}
-
-async function exportHistory() {
-  const id = state.currentPortfolioId;
-  if (!id) return;
-  try {
-    const res = await fetch(`${API}/api/portfolios/${id}/history/export`);
-    if (!res.ok) throw new Error("сервер вернул ошибку");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `bonds_history_portfolio_${id}.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast("Файл истории скачан", "ok");
-  } catch (e) {
-    showToast(`Не удалось экспортировать историю: ${e.message}`, "err");
-  }
-}
-
-// ---------------- Модалка: добавить бумагу в существующий портфель ----------------
-
-function openAddBondModal() {
-  $("#modal-isin").value = "";
-  $("#modal-bond-name").value = "";
-  $("#modal-add-bond").hidden = false;
-  $("#modal-isin").focus();
-}
-function closeAddBondModal() {
-  $("#modal-add-bond").hidden = true;
-}
-async function confirmAddBond() {
-  const isin = $("#modal-isin").value.trim().toUpperCase();
-  const name = $("#modal-bond-name").value.trim();
-  if (!isin) {
-    showToast("Введите ISIN", "err");
+async function setCameraMode(manual) {
+  if (!state.track) return;
+  if (manual && !hasOption(state.caps.exposureMode, 'manual')) {
+    toast('Ручной режим камера не поддерживает');
     return;
   }
+  if (!manual) {
+    state.manualMode = false;
+    state.autoExposure = true;
+    $('auto-mode').classList.add('selected'); $('manual-mode').classList.remove('selected');
+    try {
+      if (hasOption(state.caps.exposureMode, 'continuous')) await state.track.applyConstraints({ advanced: [{ exposureMode: 'continuous' }] });
+      $('iso-control').disabled = true; $('shutter-control').disabled = true; $('ev-control').disabled = !state.caps.exposureCompensation;
+      toast('Автоэкспозиция включена');
+    } catch (_) { toast('Не удалось вернуть автоэкспозицию'); }
+    return;
+  }
+  state.manualMode = true;
+  state.autoExposure = false;
+  $('manual-mode').classList.add('selected'); $('auto-mode').classList.remove('selected');
+  const settings = state.track.getSettings?.() || {};
+  const iso = settings.iso || Math.max(state.caps.iso.min, Math.min(state.caps.iso.max, 100));
+  const exposureTime = settings.exposureTime || Math.max(state.caps.exposureTime.min, Math.min(state.caps.exposureTime.max, 1 / 125));
   try {
-    await api(`/api/portfolios/${state.currentPortfolioId}/bonds`, {
-      method: "POST",
-      body: JSON.stringify({ isin, name: name || undefined }),
-    });
-    closeAddBondModal();
-    showToast("Бумага добавлена. Запустите расчёт, чтобы обновить доходности.", "ok");
-    await refreshPortfolioDetail();
-  } catch (e) {
-    showToast(`Не удалось добавить бумагу: ${e.message}`, "err");
+    await state.track.applyConstraints({ advanced: [{ exposureMode: 'manual', iso, exposureTime }] });
+    $('iso-control').disabled = false; $('shutter-control').disabled = false; $('ev-control').disabled = true;
+    $('iso-control').value = iso;
+    $('shutter-control').value = secondsToSlider(exposureTime);
+    refreshActualExposure();
+    toast('Ручной режим применён камерой');
+  } catch (_) {
+    state.manualMode = false;
+    $('manual-mode').classList.remove('selected'); $('auto-mode').classList.add('selected');
+    toast('Телефон не применил ручные параметры');
   }
 }
 
-// ---------------- Модалка: методология ----------------
-
-async function openMethodologyModal() {
-  $("#modal-methodology").hidden = false;
+async function changeManualValue(kind, value) {
+  if (!state.track || !state.manualMode) return;
+  const update = kind === 'iso' ? { iso: Number(value) } : { exposureTime: sliderToSeconds(value) };
   try {
-    const data = await api("/api/methodology");
-    $("#methodology-text").textContent = data.yield_methodology;
-  } catch (e) {
-    $("#methodology-text").textContent = "Не удалось загрузить описание методологии — backend недоступен.";
-  }
+    await state.track.applyConstraints({ advanced: [update] });
+    refreshActualExposure();
+    if (kind === 'iso') $('iso-label').textContent = `ISO ${Math.round(Number(value))}`;
+    else $('shutter-label').textContent = formatShutter(update.exposureTime);
+  } catch (_) { toast('Не удалось применить параметр'); }
 }
 
-// ---------------- Инициализация событий ----------------
+async function toggleTorch() {
+  if (!state.track || !state.caps.torch) return;
+  state.torchOn = !state.torchOn;
+  try {
+    await state.track.applyConstraints({ advanced: [{ torch: state.torchOn }] });
+    $('torch-button').style.color = state.torchOn ? '#d9ff5a' : '';
+  } catch (_) { state.torchOn = false; toast('Вспышка не поддерживается этой камерой'); }
+}
 
-function initEvents() {
-  $("#btn-new-portfolio").addEventListener("click", () => { resetCreateForm(); showScreen("screen-create"); });
-  $("#btn-new-portfolio-empty").addEventListener("click", () => { resetCreateForm(); showScreen("screen-create"); });
-  $("#btn-back-from-create").addEventListener("click", () => { showScreen("screen-list"); loadPortfolioList(); });
-  $("#btn-back-from-detail").addEventListener("click", () => { showScreen("screen-list"); loadPortfolioList(); });
-
-  $("#btn-add-bond-draft").addEventListener("click", addDraftBond);
-  $("#f-isin").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addDraftBond(); } });
-
-  $("#file-drop").addEventListener("click", () => $("#f-history-file").click());
-  $("#f-history-file").addEventListener("change", e => {
-    const file = e.target.files[0];
-    if (file) {
-      state.draftHistoryFile = file;
-      $("#file-drop-label").textContent = file.name;
+async function capturePhoto() {
+  if (!state.track || !video.videoWidth) return;
+  $('capture-button').disabled = true;
+  let blob;
+  try {
+    if ('ImageCapture' in window) {
+      try { blob = await new ImageCapture(state.track).takePhoto(); } catch (_) { blob = null; }
     }
+    if (!blob) {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .96));
+    }
+    if (!blob) throw new Error('Снимок не получился');
+    const actual = state.track.getSettings?.() || {};
+    const entry = { id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, blob, date: Date.now(), score: Number($('score-badge').querySelector('b').textContent) || 0, label: state.best ? localized(state.best.category?.categoryName || 'кадр') : 'кадр', iso: actual.iso || null, exposureTime: actual.exposureTime || null };
+    await savePhoto(entry);
+    state.photos.unshift(entry);
+    updatePhotoCount();
+    navigator.vibrate?.(35);
+    toast(`Снимок сохранён · ${entry.score}/100`);
+  } catch (error) { toast(error.message || 'Не удалось сохранить снимок'); }
+  finally { $('capture-button').disabled = false; }
+}
+
+function openDb() {
+  if (!('indexedDB' in window)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const request = indexedDB.open('photo-scout-roll', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('photos', { keyPath: 'id' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
   });
-
-  $("#btn-create-portfolio").addEventListener("click", submitNewPortfolio);
-
-  $("#btn-run-now").addEventListener("click", () => runNow(true));
-  $("#btn-save-positions").addEventListener("click", savePositions);
-  $("#btn-export-history").addEventListener("click", exportHistory);
-  $("#btn-import-history").addEventListener("click", () => $("#f-import-history").click());
-  $("#f-import-history").addEventListener("change", e => importHistoryForCurrentPortfolio(e.target.files[0]));
-
-  $("#btn-add-bond-detail").addEventListener("click", openAddBondModal);
-  $("#modal-cancel").addEventListener("click", closeAddBondModal);
-  $("#modal-confirm").addEventListener("click", confirmAddBond);
-  $("#modal-isin").addEventListener("keydown", e => { if (e.key === "Enter") confirmAddBond(); });
-
-  $("#btn-methodology").addEventListener("click", openMethodologyModal);
-  $("#methodology-close").addEventListener("click", () => { $("#modal-methodology").hidden = true; });
+}
+function dbRequest(mode, action) {
+  return new Promise((resolve) => {
+    if (!state.db) return resolve(null);
+    const transaction = state.db.transaction('photos', mode);
+    const request = action(transaction.objectStore('photos'));
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+}
+async function savePhoto(entry) { state.db ||= await openDb(); await dbRequest('readwrite', (store) => store.put(entry)); }
+async function loadPhotos() {
+  state.db ||= await openDb();
+  state.photos = (await dbRequest('readonly', (store) => store.getAll())) || state.photos;
+  state.photos.sort((a, b) => b.date - a.date);
+  updatePhotoCount();
+}
+function updatePhotoCount() {
+  $('photo-count').textContent = state.photos.length;
+  $('nav-count').hidden = state.photos.length === 0;
+}
+function renderGallery() {
+  const grid = $('gallery-grid');
+  state.galleryUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.galleryUrls = [];
+  grid.replaceChildren();
+  $('empty-gallery').hidden = state.photos.length > 0;
+  for (const photo of state.photos) {
+    const button = document.createElement('button');
+    button.className = 'photo-card';
+    button.type = 'button';
+    button.setAttribute('aria-label', `Открыть снимок ${photo.label}`);
+    const image = document.createElement('img');
+    image.src = URL.createObjectURL(photo.blob);
+    state.galleryUrls.push(image.src);
+    image.alt = photo.label;
+    const score = document.createElement('span'); score.className = 'photo-score'; score.textContent = `◈ ${photo.score}`;
+    const open = document.createElement('span'); open.className = 'photo-open'; open.textContent = '✳';
+    button.append(image, score, open);
+    button.addEventListener('click', () => { state.activePhoto = photo; state.activeImage = null; showPage('editor'); });
+    grid.append(button);
+  }
 }
 
-// ---------------- Старт ----------------
-
-async function init() {
-  initEvents();
-  await checkConnection();
-  setInterval(checkForNewRecommendation, 5 * 60 * 1000);
-  showScreen("screen-list");
-  await loadPortfolioList();
+async function openEditor(photo) {
+  state.activePhoto = photo;
+  if (state.activeImage) URL.revokeObjectURL(state.activeImage);
+  state.activeImage = URL.createObjectURL(photo.blob);
+  const image = new Image();
+  image.onload = () => {
+    const maxSide = 2000;
+    const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+    editCanvas.width = Math.round(image.naturalWidth * scale);
+    editCanvas.height = Math.round(image.naturalHeight * scale);
+    $('editor-empty').hidden = true;
+    resetEdit(false);
+    renderEdit(image);
+  };
+  image.src = state.activeImage;
+  state.editorSource = image;
 }
 
-document.addEventListener("DOMContentLoaded", init);
+function resizeEditor() {
+  if (state.editorSource?.complete && state.editorSource.naturalWidth && state.activePhoto) renderEdit(state.editorSource);
+}
+function renderEdit(image = state.editorSource) {
+  if (!image?.naturalWidth) return;
+  const { exposure, contrast, color, preset } = state.edit;
+  const presetValues = { natural: { sat: 1, sepia: 0, gray: 0 }, warm: { sat: 1.08, sepia: .14, gray: 0 }, mono: { sat: 0, sepia: 0, gray: 1 }, vivid: { sat: 1.35, sepia: 0, gray: 0 } }[preset];
+  const brightness = Math.max(.55, Math.min(1.55, 1 + exposure / 100));
+  const contrastValue = Math.max(.7, Math.min(1.5, 1 + contrast / 100));
+  const saturation = Math.max(0, Math.min(1.8, presetValues.sat + color / 100));
+  editContext.save();
+  editContext.filter = `brightness(${brightness}) contrast(${contrastValue}) saturate(${saturation}) grayscale(${presetValues.gray}) sepia(${presetValues.sepia})`;
+  editContext.clearRect(0, 0, editCanvas.width, editCanvas.height);
+  editContext.drawImage(image, 0, 0, editCanvas.width, editCanvas.height);
+  editContext.restore();
+  $('edit-exposure-value').textContent = `${exposure > 0 ? '+' : ''}${exposure}`;
+  $('edit-contrast-value').textContent = `${contrast > 0 ? '+' : ''}${contrast}`;
+  $('edit-color-value').textContent = `${color > 0 ? '+' : ''}${color}`;
+}
+
+function resetEdit(render = true) {
+  state.edit = { exposure: 0, contrast: 0, color: 0, preset: 'natural' };
+  $('edit-exposure').value = 0; $('edit-contrast').value = 0; $('edit-color').value = 0;
+  document.querySelectorAll('.preset').forEach((button) => button.classList.toggle('selected', button.dataset.preset === 'natural'));
+  if (render && state.activeImage) renderEdit();
+}
+
+function autoEnhance() {
+  if (!state.editorSource?.naturalWidth) { toast('Сначала выбери снимок'); return; }
+  const scan = document.createElement('canvas');
+  scan.width = 64; scan.height = 64;
+  const context = scan.getContext('2d', { willReadFrequently: true });
+  context.drawImage(state.editorSource, 0, 0, 64, 64);
+  const pixels = context.getImageData(0, 0, 64, 64).data;
+  let mean = 0;
+  for (let i = 0; i < pixels.length; i += 4) mean += .2126 * pixels[i] + .7152 * pixels[i + 1] + .0722 * pixels[i + 2];
+  mean /= 64 * 64;
+  state.edit.exposure = Math.round(Math.max(-35, Math.min(35, (118 - mean) * .36)));
+  state.edit.contrast = 8;
+  state.edit.color = 5;
+  state.edit.preset = 'natural';
+  $('edit-exposure').value = state.edit.exposure; $('edit-contrast').value = state.edit.contrast; $('edit-color').value = state.edit.color;
+  document.querySelectorAll('.preset').forEach((button) => button.classList.toggle('selected', button.dataset.preset === 'natural'));
+  renderEdit();
+  toast('Свет и контраст выровнены');
+}
+
+function saveEditedCopy() {
+  if (!state.activePhoto || !state.activeImage) { toast('Сначала выбери снимок из плёнки'); return; }
+  editCanvas.toBlob(async (blob) => {
+    if (!blob) { toast('Не удалось проявить копию'); return; }
+    const edited = { ...state.activePhoto, id: `${state.activePhoto.id}-edit-${Date.now()}`, blob, date: Date.now(), label: `${state.activePhoto.label} · проявка`, edited: true };
+    await savePhoto(edited);
+    state.photos.unshift(edited);
+    updatePhotoCount();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob); link.download = `photo-scout-${Date.now()}.jpg`; link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+    toast('Копия сохранена в плёнку и загрузки');
+  }, 'image/jpeg', .94);
+}
+
+function bindControls() {
+  $('start-camera').addEventListener('click', openCamera);
+  $('capture-button').addEventListener('click', capturePhoto);
+  $('lens-button').addEventListener('click', async () => {
+    state.cameraFacing = state.cameraFacing === 'environment' ? 'user' : 'environment';
+    await openCamera();
+  });
+  $('manual-button').addEventListener('click', () => $('control-sheet').showModal());
+  $('close-sheet').addEventListener('click', () => $('control-sheet').close());
+  $('sheet-done').addEventListener('click', () => $('control-sheet').close());
+  $('auto-mode').addEventListener('click', () => setCameraMode(false));
+  $('manual-mode').addEventListener('click', () => setCameraMode(true));
+  $('ev-control').addEventListener('input', (event) => applyExposure(event.target.value));
+  $('iso-control').addEventListener('input', (event) => changeManualValue('iso', event.target.value));
+  $('shutter-control').addEventListener('input', (event) => changeManualValue('shutter', event.target.value));
+  $('zoom-control').addEventListener('input', async (event) => {
+    if (!state.track || !state.caps.zoom) return;
+    $('zoom-label').textContent = `${Number(event.target.value).toFixed(1)}×`;
+    try { await state.track.applyConstraints({ advanced: [{ zoom: Number(event.target.value) }] }); }
+    catch (_) { toast('Зум не применился'); }
+  });
+  $('torch-button').addEventListener('click', toggleTorch);
+  $('screen-toggle').addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  });
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
+  $('back-camera').addEventListener('click', () => showPage('camera'));
+  $('close-editor').addEventListener('click', () => showPage('gallery'));
+  $('reset-edit').addEventListener('click', () => resetEdit());
+  $('save-edit').addEventListener('click', saveEditedCopy);
+  $('auto-enhance').addEventListener('click', autoEnhance);
+  const sliders = [['edit-exposure', 'exposure'], ['edit-contrast', 'contrast'], ['edit-color', 'color']];
+  sliders.forEach(([id, key]) => $(id).addEventListener('input', (event) => { state.edit[key] = Number(event.target.value); renderEdit(); }));
+  document.querySelectorAll('.preset').forEach((button) => button.addEventListener('click', () => {
+    state.edit.preset = button.dataset.preset;
+    document.querySelectorAll('.preset').forEach((item) => item.classList.toggle('selected', item === button));
+    renderEdit();
+  }));
+  window.addEventListener('resize', () => { drawOverlay(); resizeEditor(); });
+  window.addEventListener('pagehide', stopCamera);
+}
+
+bindControls();
+loadPhotos().then(renderGallery);
