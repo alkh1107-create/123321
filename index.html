@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Купон · ИИ-портфель облигаций MOEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="noise-overlay"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <svg class="brand-mark" width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <path d="M4 20 L10 12 L15 16 L24 6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="24" cy="6" r="2.5" fill="var(--accent)"/>
+      </svg>
+      <span class="brand-name">Купон</span>
+      <span class="brand-tag">ИИ-портфель MOEX</span>
+    </div>
+    <div class="topbar-right">
+      <a class="btn btn-secondary" href="camera.html">Камера</a>
+      <span class="status-pill" id="conn-status">
+        <span class="dot"></span> проверка соединения…
+      </span>
+      <button class="btn btn-ghost" id="btn-methodology">Как считаем доходность</button>
+    </div>
+  </div>
+</header>
+
+<main class="shell">
+
+  <!-- ============ ЭКРАН: НЕТ ПОРТФЕЛЕЙ / СПИСОК ============ -->
+  <section class="screen" id="screen-list">
+    <div class="screen-head">
+      <div>
+        <h1 class="hero-title">Портфели</h1>
+        <p class="hero-sub">Каждый портфель — свой список бумаг, бюджет и риск-профиль. Данные с MOEX обновляются автоматически раз в 24 часа.</p>
+      </div>
+      <button class="btn btn-primary" id="btn-new-portfolio">+ Новый портфель</button>
+    </div>
+
+    <div class="portfolio-grid" id="portfolio-grid">
+      <!-- заполняется JS -->
+    </div>
+
+    <div class="empty-state" id="empty-state" hidden>
+      <div class="empty-glyph">◈</div>
+      <p>Портфелей пока нет.</p>
+      <button class="btn btn-primary" id="btn-new-portfolio-empty">Создать первый портфель</button>
+    </div>
+  </section>
+
+  <!-- ============ ЭКРАН: СОЗДАНИЕ ПОРТФЕЛЯ ============ -->
+  <section class="screen" id="screen-create" hidden>
+    <div class="screen-head">
+      <div>
+        <button class="link-back" id="btn-back-from-create">← Назад к портфелям</button>
+        <h1 class="hero-title">Новый портфель</h1>
+        <p class="hero-sub">Укажите бумаги и параметры. Историю можно продолжить из старого файла или начать с нуля.</p>
+      </div>
+    </div>
+
+    <div class="form-grid">
+      <div class="card form-card">
+        <h3 class="card-title">Параметры</h3>
+
+        <label class="field">
+          <span class="field-label">Название портфеля</span>
+          <input type="text" id="f-name" placeholder="Например, «Основной консервативный»" value="Мой портфель">
+        </label>
+
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">Бюджет, ₽</span>
+            <input type="number" id="f-budget" placeholder="300000" min="0" step="1000">
+          </label>
+          <label class="field">
+            <span class="field-label">Горизонт, дней</span>
+            <input type="number" id="f-horizon" placeholder="365" min="1">
+          </label>
+        </div>
+
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">Риск-профиль</span>
+            <select id="f-risk">
+              <option value="conservative">Консервативный</option>
+              <option value="moderate" selected>Умеренный</option>
+              <option value="aggressive">Агрессивный</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Макс. бумаг в портфеле</span>
+            <input type="number" id="f-max-positions" value="8" min="1" max="30">
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Пожелания (необязательно)</span>
+          <textarea id="f-notes" rows="2" placeholder="Например: избегать бумаг с офертой раньше чем через полгода"></textarea>
+        </label>
+      </div>
+
+      <div class="card form-card">
+        <h3 class="card-title">Бумаги (ISIN)</h3>
+        <p class="card-hint">Добавьте ISIN-коды облигаций, которые хотите отслеживать. Короткое имя MOEX подставится автоматически при первом запуске.</p>
+
+        <div class="bond-input-row">
+          <input type="text" id="f-isin" placeholder="RU000A10C3M0" class="mono-input">
+          <input type="text" id="f-bond-name" placeholder="имя (необязательно)">
+          <button class="btn btn-secondary" id="btn-add-bond-draft">Добавить</button>
+        </div>
+
+        <ul class="bond-draft-list" id="bond-draft-list"></ul>
+
+        <div class="divider"></div>
+
+        <h3 class="card-title">История (необязательно)</h3>
+        <p class="card-hint">Загрузите ваш старый <code>bonds_history.xlsx</code>, чтобы продолжить историю — или начните с нуля, и модель накопит наблюдения сама.</p>
+        <label class="file-drop" id="file-drop">
+          <input type="file" id="f-history-file" accept=".xlsx,.xls" hidden>
+          <span class="file-drop-icon">↥</span>
+          <span id="file-drop-label">Выбрать файл bonds_history.xlsx</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-primary btn-lg" id="btn-create-portfolio">Создать и запустить</button>
+    </div>
+  </section>
+
+  <!-- ============ ЭКРАН: ДЕТАЛИ ПОРТФЕЛЯ ============ -->
+  <section class="screen" id="screen-detail" hidden>
+    <div class="screen-head">
+      <div>
+        <button class="link-back" id="btn-back-from-detail">← Назад к портфелям</button>
+        <h1 class="hero-title" id="d-title">—</h1>
+        <p class="hero-sub" id="d-sub">—</p>
+      </div>
+      <div class="detail-actions">
+        <button class="btn btn-secondary" id="btn-export-history">Экспорт истории (.xlsx)</button>
+        <button class="btn btn-primary" id="btn-run-now">Пересчитать ребалансировку</button>
+      </div>
+    </div>
+
+    <div class="kpi-row" id="kpi-row">
+      <div class="kpi-card">
+        <span class="kpi-label">Курс USD/RUB</span>
+        <span class="kpi-value mono" id="kpi-usd">—</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Бумаг отслеживается</span>
+        <span class="kpi-value mono" id="kpi-bonds">—</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Живые котировки</span>
+        <span class="kpi-value mono" id="kpi-live">—</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Ожид. доходность ИИ-портфеля</span>
+        <span class="kpi-value mono accent" id="kpi-expected-yield">—</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Последнее обновление</span>
+        <span class="kpi-value mono" id="kpi-last-run">—</span>
+      </div>
+    </div>
+
+    <div class="run-banner" id="run-banner" hidden></div>
+
+    <div class="detail-grid">
+
+      <!-- Рекомендованный портфель -->
+      <div class="card panel-recommendation">
+        <div class="panel-head">
+          <h3 class="card-title">Рекомендация ИИ</h3>
+          <span class="badge" id="rec-model-badge">—</span>
+        </div>
+        <p class="rec-summary" id="rec-summary">Запустите расчёт, чтобы получить рекомендацию.</p>
+        <p class="card-hint" id="portfolio-risk-summary"></p>
+        <div class="alloc-list" id="alloc-list"></div>
+        <div class="rebalance-plan" id="rebalance-plan"></div>
+        <div class="warnings-list" id="warnings-list"></div>
+      </div>
+
+      <div class="card panel-positions">
+        <div class="panel-head">
+          <h3 class="card-title">Счёт и цели портфеля</h3>
+          <button class="btn btn-secondary btn-sm" id="btn-save-positions">Сохранить данные и цели</button>
+        </div>
+        <label class="field position-budget-field">
+          <span class="field-label">Общий бюджет портфеля, ₽</span>
+          <input type="number" id="position-budget" min="1" step="1000" placeholder="Например, 300000">
+        </label>
+        <label class="field position-budget-field">
+          <span class="field-label">Свободные деньги на счёте, ₽</span>
+          <input type="number" id="position-cash" min="0" step="1000" placeholder="Пусто — оценить из бюджета и позиций">
+        </label>
+        <label class="field position-budget-field">
+          <span class="field-label">Комиссия брокера за сделку, %</span>
+          <input type="number" id="position-commission" min="0" max="1" step="0.001" placeholder="Пусто — использовать backend/.env">
+        </label>
+        <label class="field">
+          <span class="field-label">Комментарий и ограничения для ИИ</span>
+          <textarea id="portfolio-notes" rows="2" placeholder="Например: важна ликвидность, не покупать бумаги с офертой раньше 6 месяцев"></textarea>
+        </label>
+        <p class="card-hint">«Факт» — бумаги, которые уже есть на брокерском счёте; эти данные нужны, чтобы понять, что продать и оценить результат. «Цель по ИИ» заполняется из рекомендации автоматически и редактируется в лотах. Нажмите «Сохранить данные и цели», чтобы пересчитать план. Пустой денежный остаток программа оценивает по бюджету и фактическим позициям.</p>
+        <div id="positions-editor"></div>
+      </div>
+
+      <!-- Бумаги в портфеле -->
+      <div class="card panel-bonds">
+        <div class="panel-head">
+          <h3 class="card-title">Бумаги в портфеле</h3>
+          <button class="btn btn-ghost btn-sm" id="btn-add-bond-detail">+ добавить</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="bonds-table">
+            <thead>
+              <tr>
+                <th>Бумага</th>
+                <th>ISIN</th>
+                <th class="num">Доходность покупки, чистая</th>
+                <th>Расчёт</th>
+                <th class="num">Покупка с НКД и комиссией</th>
+                <th>Котировка</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="bonds-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Матрица отношений -->
+    <div class="card panel-matrix">
+      <div class="panel-head">
+        <h3 class="card-title">Матрица отношений доходностей</h3>
+        <p class="card-hint">Продать (строка) → купить (столбец). В ячейке: чистая доходность покупки бумаги в столбце / чистая доходность продажи бумаги в строке. Учтены BID/ASK, НКД, налог на купоны и комиссия.</p>
+      </div>
+      <div class="matrix-wrap" id="matrix-wrap">
+        <p class="muted">Пока нет данных. Запустите расчёт.</p>
+      </div>
+    </div>
+
+    <!-- Сигналы -->
+    <div class="card panel-signals">
+      <div class="panel-head">
+        <h3 class="card-title">Сигналы на переток</h3>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="signals-table">
+          <thead>
+            <tr>
+              <th>Продать</th>
+              <th>Купить</th>
+              <th class="num">Сегодня</th>
+              <th class="num">Выгода за горизонт</th>
+              <th class="num">Медиана истории</th>
+              <th>Статус</th>
+              <th>Комментарий</th>
+            </tr>
+          </thead>
+          <tbody id="signals-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- История прогонов -->
+      <div class="card panel-history">
+        <div class="panel-head">
+          <h3 class="card-title">История обновлений</h3>
+          <button class="btn btn-secondary btn-sm" id="btn-import-history">Импорт истории (.xlsx)</button>
+          <input type="file" id="f-import-history" accept=".xlsx,.xls" hidden>
+        </div>
+      <div class="history-timeline" id="history-timeline"></div>
+    </div>
+
+  </section>
+
+</main>
+
+<!-- Модалка: добавить бумагу в существующий портфель -->
+<div class="modal-backdrop" id="modal-add-bond" hidden>
+  <div class="modal">
+    <h3 class="card-title">Добавить бумагу</h3>
+    <label class="field">
+      <span class="field-label">ISIN</span>
+      <input type="text" id="modal-isin" class="mono-input" placeholder="RU000A10C3M0">
+    </label>
+    <label class="field">
+      <span class="field-label">Имя (необязательно)</span>
+      <input type="text" id="modal-bond-name" placeholder="Короткое имя">
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modal-cancel">Отмена</button>
+      <button class="btn btn-primary" id="modal-confirm">Добавить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модалка: методология расчёта доходности -->
+<div class="modal-backdrop" id="modal-methodology" hidden>
+  <div class="modal modal-wide">
+    <h3 class="card-title">Как считается доходность</h3>
+    <p id="methodology-text" class="methodology-text">Загрузка…</p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="methodology-close">Понятно</button>
+    </div>
+  </div>
+</div>
+
+<!-- Тост-уведомления -->
+<div class="toast-stack" id="toast-stack"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#090c0e">
+  <title>Камера · Купон</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="camera.css">
+</head>
+<body class="camera-page">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="camera-brand" href="index.html" aria-label="Вернуться в Купон">
+        <span class="camera-brand-mark">◉</span><span class="brand-name">Купон</span><span class="brand-tag">камера</span>
+      </a>
+      <a class="btn btn-ghost" href="index.html">← Портфели</a>
+    </div>
+  </header>
+
+  <main class="camera-shell">
+    <section class="camera-heading">
+      <div><p class="eyebrow">МОБИЛЬНАЯ КАМЕРА · БЕТА</p><h1>Найдите хороший кадр</h1><p>Подсказки по свету, резкости и композиции прямо в видоискателе.</p></div>
+      <span class="camera-state" id="camera-state"><i></i> Камера не запущена</span>
+    </section>
+
+    <div class="camera-layout">
+      <section class="viewfinder" aria-label="Видоискатель">
+        <video id="camera-video" autoplay muted playsinline></video>
+        <div class="viewfinder-placeholder" id="camera-placeholder"><span class="placeholder-icon">◉</span><b>Разрешите доступ к камере</b><span>Видео анализируется только на этом устройстве.</span><button id="start-camera" class="btn btn-primary">Запустить камеру</button></div>
+        <div class="viewfinder-shade"></div>
+        <div class="thirds-grid" id="thirds-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="horizon" id="horizon"><span></span></div>
+        <div class="finder-top"><span class="live-pill"><i></i> LIVE</span><span id="scene-label">Сцена: ожидание</span></div>
+        <div class="finder-bottom"><span id="horizon-label">Уровень · —°</span><span id="light-label">Свет · —</span><span id="sharp-label">Резкость · —</span></div>
+      </section>
+
+      <aside class="camera-panel">
+        <section class="camera-card score-card">
+          <div class="panel-caption">АНАЛИЗ КАДРА <span id="analysis-state">ожидание</span></div>
+          <div class="score-line"><strong id="frame-score">—</strong><span>/ 100</span><b id="score-label">Запустите камеру</b></div>
+          <div class="score-track"><i id="score-fill"></i></div>
+          <p id="frame-tip">Держите телефон ровно и дождитесь анализа изображения.</p>
+          <p class="score-note">Оценка — ориентир по свету, контрасту, резкости и уровню горизонта; это не гарантия художественного качества.</p>
+        </section>
+
+        <section class="camera-card">
+          <div class="panel-caption">ПОДСКАЗКИ ПО СЪЁМКЕ</div>
+          <div class="settings-grid">
+            <div><span>ISO · рекомендация</span><b id="iso-value">—</b></div>
+            <div><span>Выдержка · рекомендация</span><b id="shutter-value">—</b></div>
+            <div><span>Экспокоррекция</span><b id="ev-value">Авто</b></div>
+            <div><span>Горизонт</span><b id="level-value">—</b></div>
+          </div>
+          <p class="support-note" id="camera-capabilities">Параметры камеры определятся после запуска.</p>
+        </section>
+
+        <section class="camera-card manual-card">
+          <div class="panel-caption">РУЧНАЯ ЭКСПОКОРРЕКЦИЯ <span id="ev-support">авто</span></div>
+          <label class="auto-exposure"><span>Помощь автоэкспозиции</span><input id="auto-exposure" type="checkbox" checked></label>
+          <label for="ev-range">Яркость <output id="ev-output">0 EV</output></label>
+          <input id="ev-range" type="range" min="-2" max="2" step="0.1" value="0" disabled>
+          <p class="support-note">ISO и выдержка зависят от модели телефона. В веб-камере они доступны редко; выше указана безопасная отправная точка для ручного режима родной камеры.</p>
+        </section>
+
+        <div class="camera-actions">
+          <button id="capture-button" class="shutter-button" aria-label="Сохранить снимок" disabled><span></span></button>
+          <button id="flip-camera" class="btn btn-secondary" disabled>↻ Переключить</button>
+          <button id="toggle-grid" class="btn btn-secondary">Сетка: вкл.</button>
+        </div>
+        <a id="download-link" class="download-link" hidden download="camera-shot.jpg">Скачать снимок</a>
+      </aside>
+    </div>
+    <p class="camera-footnote">Нужен защищённый сайт (HTTPS) или localhost. Автонастройка камеры ограничена браузером и устройством; доступ к файлам и видео не отправляется на сервер.</p>
+  </main>
+  <canvas id="analysis-canvas" width="224" height="224" hidden></canvas>
+  <canvas id="capture-canvas" hidden></canvas>
+  <script src="camera.js" defer></script>
+</body>
+</html>
